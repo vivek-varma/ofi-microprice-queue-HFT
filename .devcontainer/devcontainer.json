@@ -1,0 +1,34 @@
+{
+  "name": "OFI + Microprice Queue Backtester",
+  "image": "mcr.microsoft.com/devcontainers/cpp:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.11" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-vscode.cmake-tools",
+        "twxs.cmake",
+        "ms-vscode.cpptools-themes",
+        "ms-vscode.gitlens"
+      ],
+      "settings": {
+        "cmake.generator": "Ninja",
+        "cmake.buildDirectory": "${workspaceFolder}/build",
+        "cmake.configureOnOpen": true,
+        "cmake.preferredGenerators": ["Ninja"],
+        "C_Cpp.default.compilerPath": "/usr/bin/clang++",
+        "clangd.arguments": ["--header-insertion=never"],
+        "files.associations": { "span": "cpp" }
+      }
+    }
+  },
+  "containerEnv": {
+    "DBN_API_KEY": "${{secrets.DBN_API_KEY}}"
+  },
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y ninja-build clang lld gdb && cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ || true",
+  "remoteUser": "vscode"
+}
