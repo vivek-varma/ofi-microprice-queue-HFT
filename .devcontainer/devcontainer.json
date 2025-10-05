@@ -29,6 +29,6 @@
   "containerEnv": {
     "DBN_API_KEY": "${{secrets.DBN_API_KEY}}"
   },
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y ninja-build clang lld gdb && cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ || true",
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y ninja-build clang lld gdb libzstd-dev zlib1g-dev pkg-config && cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ || true",
   "remoteUser": "vscode"
 }

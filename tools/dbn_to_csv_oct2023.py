@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-Convert Databento DBN files (MBP-1 / Trades) -> lean CSVs, month-wide but memory-safe.
+Low-memory converter: Databento DBN (MBP-1 / Trades) -> lean CSVs for October 2023.
 
 Outputs under <DATA_ROOT>/csv/:
   csv/mbp-1/mbp1_YYYYMMDD.csv       -> ts_recv_ns,bid_px_int,bid_sz,ask_px_int,ask_sz
   csv/trades/trades_YYYYMMDD.csv    -> ts_recv_ns,px_int,sz,side (1=buy,2=sell,0=unk)
-
-Tips:
-  - Run MBP-1 first (`--only mbp-1`), then Trades (`--only trades`) if you hit OOM.
-  - Use `--start-day` to resume where you left off.
 """
+
 from __future__ import annotations
 import argparse, gc, pathlib, re
 from datetime import date, timedelta
 import pandas as pd
 import databento as db
 
+# -------- helpers --------
+
 def day_iter(year: int, month: int, start_day: int = 1):
     d = date(year, month, start_day)
+    # next month
     ny, nm = (year + (month == 12), (month % 12) + 1)
     end = date(ny, nm, 1)
     while d < end:
@@ -36,28 +36,42 @@ def find_dbn_for_day(root: pathlib.Path, ymd: str, kind: str) -> pathlib.Path | 
             return p
     return None
 
-def store_to_df_one(dbn_path: pathlib.Path) -> pd.DataFrame:
-    # Load ONE file, turn into df; move ts index to column if needed.
-    store = db.DBNStore.from_file(dbn_path)
-    df = store.to_df()
+def to_df_columns(store: db.DBNStore, cols: list[str]) -> pd.DataFrame:
+    """
+    Low-memory: request only specific columns from the store.
+    Many Databento builds support 'columns=' for to_df(); if not, we fall back to full to_df().
+    We also reset the time index if it's on the index.
+    """
+    try:
+        df = store.to_df(columns=cols)  # preferred (column-pruned)
+    except TypeError:
+        # Column selection unsupported in this build -> fallback to full then subset
+        df = store.to_df()
+    # move time index to a column if needed
     if isinstance(df.index, pd.MultiIndex) or df.index.name in ("ts_recv", "ts_event"):
         df = df.reset_index()
+    # subset (handles fallback path)
+    keep = [c for c in cols if c in df.columns]
+    df = df[keep]
     return df
 
 def normalize_mbp1(df: pd.DataFrame) -> pd.DataFrame:
-    # Keep only: ts_recv_ns, bid_px_int, bid_sz, ask_px_int, ask_sz
-    candidates = [
-        {"ts_recv":"ts_recv_ns", "bid_px":"bid_px_int", "bid_sz":"bid_sz", "ask_px":"ask_px_int", "ask_sz":"ask_sz"},
-        {"ts_event":"ts_recv_ns","bid_px":"bid_px_int", "bid_sz":"bid_sz", "ask_px":"ask_px_int", "ask_sz":"ask_sz"},
-    ]
-    for m in candidates:
-        if all(k in df.columns for k in m):
-            return df[list(m)].rename(columns=m)
-    keep = [c for c in ("ts_recv","ts_event","bid_px","bid_sz","ask_px","ask_sz") if c in df.columns]
-    if not keep:
-        raise RuntimeError(f"MBP-1: unexpected columns {df.columns.tolist()}")
-    return df[keep].rename(columns={"ts_recv":"ts_recv_ns","ts_event":"ts_recv_ns",
-                                    "bid_px":"bid_px_int","ask_px":"ask_px_int"})
+    # We want: ts_recv_ns, bid_px_int, bid_sz, ask_px_int, ask_sz
+    # Accept common variants for ts column name
+    if "ts_recv" in df.columns and "ts_recv_ns" not in df.columns:
+        df = df.rename(columns={"ts_recv": "ts_recv_ns"})
+    if "ts_event" in df.columns and "ts_recv_ns" not in df.columns:
+        df = df.rename(columns={"ts_event": "ts_recv_ns"})
+    # price columns
+    if "bid_px" in df.columns and "bid_px_int" not in df.columns:
+        df = df.rename(columns={"bid_px": "bid_px_int"})
+    if "ask_px" in df.columns and "ask_px_int" not in df.columns:
+        df = df.rename(columns={"ask_px": "ask_px_int"})
+    # final narrow set
+    cols = [c for c in ("ts_recv_ns","bid_px_int","bid_sz","ask_px_int","ask_sz") if c in df.columns]
+    if len(cols) < 5:
+        raise RuntimeError(f"MBP-1 column mismatch; got {df.columns.tolist()}")
+    return df[cols]
 
 def _map_side_val(x) -> int:
     if pd.isna(x): return 0
@@ -67,85 +81,80 @@ def _map_side_val(x) -> int:
     return 0
 
 def normalize_trades(df: pd.DataFrame) -> pd.DataFrame:
-    # Keep only: ts_recv_ns, px_int, sz, side
-    candidates = [
-        {"ts_recv":"ts_recv_ns", "px":"px_int", "size":"sz", "side":"side"},
-        {"ts_recv":"ts_recv_ns", "px":"px_int", "sz":"sz",  "side":"side"},
-        {"ts_recv":"ts_recv_ns", "px":"px_int", "size":"sz","aggressor":"side"},
-    ]
-    for m in candidates:
-        if all(k in df.columns for k in m):
-            out = df[list(m)].rename(columns=m)
-            out["side"] = out["side"].map(_map_side_val)
-            return out
-    cols = df.columns
-    ts = "ts_recv" if "ts_recv" in cols else ("ts_event" if "ts_event" in cols else None)
-    px = "px" if "px" in cols else ("price" if "price" in cols else None)
-    sz = "size" if "size" in cols else ("qty" if "qty" in cols else ("sz" if "sz" in cols else None))
-    side = next((c for c in ("side","aggressor","action","liquidity_flag") if c in cols), None)
-    keep = [c for c in (ts, px, sz, side) if c]
-    if not keep:
-        raise RuntimeError(f"Trades: unexpected columns {df.columns.tolist()}")
-    out = df[keep].rename(columns={ts:"ts_recv_ns", px:"px_int", sz:"sz", side:"side"})
-    out["side"] = out.get("side", 0).map(_map_side_val) if "side" in out.columns else 0
-    return out
+    # We want: ts_recv_ns, px_int, sz, side (1/2/0)
+    if "ts_recv" in df.columns and "ts_recv_ns" not in df.columns:
+        df = df.rename(columns={"ts_recv": "ts_recv_ns"})
+    if "ts_event" in df.columns and "ts_recv_ns" not in df.columns:
+        df = df.rename(columns={"ts_event": "ts_recv_ns"})
+    if "px" in df.columns and "px_int" not in df.columns:
+        df = df.rename(columns={"px": "px_int"})
+    if "size" in df.columns and "sz" not in df.columns:
+        df = df.rename(columns={"size": "sz"})
+    if "aggressor" in df.columns and "side" not in df.columns:
+        df = df.rename(columns={"aggressor":"side"})
+    if "side" in df.columns:
+        df["side"] = df["side"].map(_map_side_val)
+    else:
+        df["side"] = 0
+    cols = [c for c in ("ts_recv_ns","px_int","sz","side") if c in df.columns]
+    if len(cols) < 4:
+        raise RuntimeError(f"Trades column mismatch; got {df.columns.tolist()}")
+    return df[cols]
 
 def convert_one(dbn_path: pathlib.Path, out_csv: pathlib.Path, kind: str):
     print(f"[convert] {dbn_path} -> {out_csv}")
-    df = store_to_df_one(dbn_path)
+    store = db.DBNStore.from_file(dbn_path)
     if kind == "mbp-1":
+        df = to_df_columns(store, ["ts_recv","ts_event","bid_px","bid_sz","ask_px","ask_sz"])
         out = normalize_mbp1(df)
     else:
+        df = to_df_columns(store, ["ts_recv","ts_event","px","size","sz","side","aggressor"])
         out = normalize_trades(df)
     out.to_csv(out_csv, index=False)
-    # free memory promptly
-    del df, out
+    # free memory
+    del store, df, out
     gc.collect()
 
 def run(root: pathlib.Path, year: int, month: int, start_day: int, only: str | None):
     ensure_outdirs(root)
     for ymd in day_iter(year, month, start_day):
         did_any = False
-        # MBP-1
         if only in (None, "mbp-1"):
-            f_mbp = find_dbn_for_day(root, ymd, "mbp-1")
-            if f_mbp:
+            f = find_dbn_for_day(root, ymd, "mbp-1")
+            if f:
                 out = root / "csv" / "mbp-1" / f"mbp1_{ymd}.csv"
                 if out.exists():
                     print(f"[keep] {out} exists")
                 else:
                     try:
-                        convert_one(f_mbp, out, "mbp-1")
+                        convert_one(f, out, "mbp-1")
                     except Exception as e:
                         print(f"[error] MBP-1 {ymd}: {e}")
                 did_any = True
-        # Trades
         if only in (None, "trades"):
-            f_trd = find_dbn_for_day(root, ymd, "trades")
-            if f_trd:
+            f = find_dbn_for_day(root, ymd, "trades")
+            if f:
                 out = root / "csv" / "trades" / f"trades_{ymd}.csv"
                 if out.exists():
                     print(f"[keep] {out} exists")
                 else:
                     try:
-                        convert_one(f_trd, out, "trades")
+                        convert_one(f, out, "trades")
                     except Exception as e:
                         print(f"[error] Trades {ymd}: {e}")
                 did_any = True
-
         if not did_any:
             print(f"[skip] {ymd} — no .dbn.zst found under {root}/**")
-        # small GC safety after each day
         gc.collect()
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="Convert Databento DBN (MBP-1/Trades) to lean CSVs, month-wide.")
+    ap = argparse.ArgumentParser(description="Low-memory DBN (MBP-1/Trades) -> CSV converter for a month.")
     ap.add_argument("--data-root", type=pathlib.Path, default=pathlib.Path("data"),
                     help="Root folder to scan (default: ./data)")
-    ap.add_argument("--year", type=int, default=2023, help="Year (default: 2023)")
-    ap.add_argument("--month", type=int, default=10, help="Month 1-12 (default: 10)")
-    ap.add_argument("--start-day", type=int, default=1, help="Start day of month (resume support)")
-    ap.add_argument("--only", choices=["mbp-1","trades"], help="Limit to one schema for lower memory")
+    ap.add_argument("--year", type=int, default=2023)
+    ap.add_argument("--month", type=int, default=10)
+    ap.add_argument("--start-day", type=int, default=1, help="Resume from this day")
+    ap.add_argument("--only", choices=["mbp-1","trades"], help="Limit to one schema")
     return ap.parse_args()
 
 if __name__ == "__main__":
