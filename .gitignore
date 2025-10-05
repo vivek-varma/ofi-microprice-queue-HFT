@@ -1,5 +1,6 @@
 build/
 results/
+data/
 *.csv
 *.png
 compile_commands.json
