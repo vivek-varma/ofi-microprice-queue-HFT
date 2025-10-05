@@ -1,0 +1,48 @@
+# save as scripts/show_dbn_signatures.sh, then:
+#   bash scripts/show_dbn_signatures.sh
+
+set -euo pipefail
+SDK="build/_deps/databento_cpp-src/include/databento"
+
+show_class() {
+  local hdr="$1" cls="$2"
+  local start
+  start=$(grep -n "class[[:space:]]\+$cls" "$SDK/$hdr" | head -1 | cut -d: -f1 || true)
+  if [[ -z "${start:-}" ]]; then
+    echo "!! $cls not found in $hdr"
+    return
+  fi
+  echo "=== $hdr :: class $cls ==="
+  # print the class body and extract likely method signatures
+  sed -n "${start},${start}+\$p" "$SDK/$hdr" \
+    | awk '
+      /class[[:space:]]+NAME/ {depth=0}
+      {gsub("NAME","'"$cls"'")}
+      {
+        if (/\{/){depth++}
+        if (/\}/){depth--}
+        if (depth>=1) print
+        if (depth==0 && $0 ~ /};/) exit
+      }' \
+    | sed -n '1,200p' \
+    | grep -E "^[[:space:]]*(public:|protected:|private:|template|[A-Za-z_][A-Za-z0-9_:<>,*&[:space:]]+\([^;{}]*\);)" \
+    | sed 's/^[[:space:]]\+//'
+  echo
+}
+
+show_record_helpers() {
+  echo "=== record.hpp :: helpers ==="
+  grep -nE "GetIf<|Visit\(|As<|enum class|struct Mbp1Msg|struct TradeMsg" "$SDK/record.hpp" | sed -n '1,200p' || true
+  echo
+}
+
+# 1) Show DbnDecoder and DbnFileStore method lists
+show_class "dbn_decoder.hpp"  "DbnDecoder"
+show_class "dbn_file_store.hpp" "DbnFileStore"
+
+# 2) Show record casting helpers present
+show_record_helpers
+
+# 3) Quick global hints (just in case names differ)
+echo "=== Quick token search ==="
+grep -RIn --include='*.hpp' -e 'Foreach(' -e 'ForEach(' -e 'begin(' -e 'Read(' -e 'Next(' "$SDK" | head -n 40 || true
