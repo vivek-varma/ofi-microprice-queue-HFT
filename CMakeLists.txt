@@ -60,3 +60,11 @@ add_executable(optimize_ofi
 target_include_directories(optimize_ofi PRIVATE ${PROJ_INCLUDE_DIR})
 target_link_libraries(optimize_ofi PRIVATE ${DBN_TARGET})
 target_compile_features(optimize_ofi PRIVATE cxx_std_20)
+
+# --- Tool: id_counts (inspect instrument_id distribution per day) ---
+add_executable(id_counts
+  src/tools/id_counts.cpp
+)
+target_include_directories(id_counts PRIVATE ${PROJ_INCLUDE_DIR})
+target_link_libraries(id_counts PRIVATE ${DBN_TARGET})
+target_compile_features(id_counts PRIVATE cxx_std_20)
